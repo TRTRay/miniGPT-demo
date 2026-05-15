@@ -10,14 +10,21 @@ block_size = 8
 # length of training batch / 并行训练的样本数
 batch_size = 32
 # learning rate / 学习率 -> 参数更新的步长
-learning_rate = 1e-2
+learning_rate = 1e-3
 # evaluation intevals / 每多少 step 进行一次 loss 验证，监控训练过程
-eval_interval = 300
+eval_interval = 500
 # all interations / 总共迭代多少步 iteration
-max_iters = 3000
+max_iters = 5000
 # evaluation iterations / validation 的时候采样多少 batch
 eval_iters = 200
+# 训练设备
 device = 'mps' if torch.mps.is_available() else 'cpu'
+
+# number of the embed dimension
+# in version 2, we used 32 feature channels to tokenized the vocabulary instead of bi-encoding in version 1
+n_embd = 32
+# 
+# head_size = 16
 
 
 
@@ -78,18 +85,66 @@ def estimate_loss():
     return out
 
 
-# 二元语言模型：
+# one-head self attention
+class Head(nn.Module):
+    
+    def __init__(self, head_size):
+        super().__init__()
+        # creat linears to map from token_embed to self-attention vectors
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        # 一个用于 mask 的下三角矩阵
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+
+    def forward(self, x):
+        B, T, C = x.shape   # (B,T,C)
+        k = self.key(x)     # (B,T,head_size)
+        q = self.query(x)     # (B,T,head_size)
+        # compute the weight
+        wei = q @ k.transpose(-2, -1) * C**-0.5     # (B,T,T)
+        wei = wei.masked_fill(self.tril[:T,:T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
+        # perform weighted aggregation
+        v = self.value(x)   # (B,T,head_size)
+        out = wei @ v       # (B,T,head_size)
+        return out
+
+
+
+# 二元语言模型（version 1）：
 # 1.预测的时候仅根据上一个 token 的内容进行预测；
 # 2.特征向量维数等于词汇表长度，词嵌入向量直接当做 logits 来用；
+# Version 2
 class BigramLanguageModel(nn.Module):
     
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
-        # 词嵌入，特征维数等于词汇表长度
-        self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        # version 1: 词嵌入，特征维数等于词汇表长度
+        # 其实相当于我们做了一个二维编码，最终的 logits 直接按照查找表的形式（哪个是 1 结果就是哪个字符）给出
+        # self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+        # version 2: 实现一个 self-language model head
+        # 重新做词嵌入，用 32 维的特征向量
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        # 除了编码 token 的 identification，还要编码字符出现的位置信息
+        self.positon_embedding_table = nn.Embedding(vocab_size, n_embd)
+        # a single-head self-attention
+        self.sa_head = Head(n_embd)
+        # 一个线性层将特征映射成 logits
+        self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
-        logits = self.token_embedding_table(idx)
+        # version 1: directly look up the vocabulary to get logits based on the last token
+        # logits = self.token_embedding_table(idx)
+        # version 2: 
+        B, T = idx.shape
+        token_emb = self.token_embedding_table(idx) # (batch_size, context_len, n_embd)
+        position_emb = self.positon_embedding_table(torch.arange(T, device=device)) # (context_len, n_embd)
+        # 将 token 的 identification 和 position 信息都编码进来
+        x = token_emb + position_emb
+        # 
+        x = self.sa_head(x)
+        logits = self.lm_head(x) # (batch_size, context_len, vocab_size)
         
         if targets is None:
             loss = None
@@ -106,8 +161,9 @@ class BigramLanguageModel(nn.Module):
     # predict the next token and cat at the end of the input
     def generate(self, idx, max_new_tokens):
         for _ in range(max_new_tokens):
+            idx_cond = idx[:, -block_size:]
             # call itself to predict
-            logits, loss = self(idx)
+            logits, loss = self(idx_cond)
             # only last token is the prediction we need
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
@@ -116,7 +172,7 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
         return idx
     
-model = BigramLanguageModel(vocab_size)
+model = BigramLanguageModel()
 m = model.to(device)
 
 # a pytorch optimizer
