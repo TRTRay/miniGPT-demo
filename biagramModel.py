@@ -111,11 +111,27 @@ class Head(nn.Module):
         return out
 
 
+# create a multi-head self-attention
+class MultiHeadAttention(nn.Module):
 
-# 二元语言模型（version 1）：
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+
+
+
+# 二元语言模型：
+# Version 1
 # 1.预测的时候仅根据上一个 token 的内容进行预测；
 # 2.特征向量维数等于词汇表长度，词嵌入向量直接当做 logits 来用；
 # Version 2
+# 1.加了一个单头的自注意力模块；
+# Version 3
+# 1.改成了多头注意力
 class BigramLanguageModel(nn.Module):
     
     def __init__(self):
@@ -123,15 +139,27 @@ class BigramLanguageModel(nn.Module):
         # version 1: 词嵌入，特征维数等于词汇表长度
         # 其实相当于我们做了一个二维编码，最终的 logits 直接按照查找表的形式（哪个是 1 结果就是哪个字符）给出
         # self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
+
         # version 2: 实现一个 self-language model head
+        # # 重新做词嵌入，用 32 维的特征向量
+        # self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        # # 除了编码 token 的 identification，还要编码字符出现的位置信息
+        # self.positon_embedding_table = nn.Embedding(vocab_size, n_embd)
+        # # a single-head self-attention
+        # self.sa_head = Head(n_embd)
+        # # 一个线性层将特征映射成 logits
+        # self.lm_head = nn.Linear(n_embd, vocab_size)
+
+        # version 3: multi-head self-language model head
         # 重新做词嵌入，用 32 维的特征向量
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         # 除了编码 token 的 identification，还要编码字符出现的位置信息
         self.positon_embedding_table = nn.Embedding(vocab_size, n_embd)
-        # a single-head self-attention
-        self.sa_head = Head(n_embd)
+        # 4 head of 8-dimentional self-attention
+        self.sa_heads = MultiHeadAttention(4, n_embd // 4)
         # 一个线性层将特征映射成 logits
         self.lm_head = nn.Linear(n_embd, vocab_size)
+
 
     def forward(self, idx, targets=None):
         # version 1: directly look up the vocabulary to get logits based on the last token
@@ -142,8 +170,10 @@ class BigramLanguageModel(nn.Module):
         position_emb = self.positon_embedding_table(torch.arange(T, device=device)) # (context_len, n_embd)
         # 将 token 的 identification 和 position 信息都编码进来
         x = token_emb + position_emb
-        # 
-        x = self.sa_head(x)
+        # 引入一个注意力头让 context 中的 token 能够“交流“起来
+        # x = self.sa_head(x)
+        # apply multi-head self attention
+        x = self.sa_heads(x)
         logits = self.lm_head(x) # (batch_size, context_len, vocab_size)
         
         if targets is None:
