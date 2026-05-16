@@ -117,10 +117,46 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
 
     
     def forward(self, x):
-        return torch.cat([h(x) for h in self.heads], dim=-1)
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
+
+
+# Version 3: 
+class FeedForward(nn.Module):
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd * 4),
+            nn.ReLU(),
+            nn.Linear(n_embd * 4, n_embd)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+    
+# version 4: transformer blocks
+class Block(nn.Module):
+
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+
+    def forward(self, x):
+        # x = self.sa(x)
+        # x = self.ffwd(x)
+        # residual connection
+        x = x + self.sa(x)
+        x = x + self.ffwd(x)
+        return x
 
 
 
@@ -150,13 +186,26 @@ class BigramLanguageModel(nn.Module):
         # # 一个线性层将特征映射成 logits
         # self.lm_head = nn.Linear(n_embd, vocab_size)
 
-        # version 3: multi-head self-language model head
-        # 重新做词嵌入，用 32 维的特征向量
+        # # version 3: multi-head self-language model head
+        # # 重新做词嵌入，用 32 维的特征向量
+        # self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        # # 除了编码 token 的 identification，还要编码字符出现的位置信息
+        # self.positon_embedding_table = nn.Embedding(vocab_size, n_embd)
+        # # 4 head of 8-dimentional self-attention
+        # self.sa_heads = MultiHeadAttention(4, n_embd // 4)
+        # # 
+        # self.ffwd = FeedForward(n_embd)
+        # # 一个线性层将特征映射成 logits
+        # self.lm_head = nn.Linear(n_embd, vocab_size)
+
+        # version 4: introduce transformer blocks
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        # 除了编码 token 的 identification，还要编码字符出现的位置信息
         self.positon_embedding_table = nn.Embedding(vocab_size, n_embd)
-        # 4 head of 8-dimentional self-attention
-        self.sa_heads = MultiHeadAttention(4, n_embd // 4)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+        )
         # 一个线性层将特征映射成 logits
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
@@ -173,7 +222,12 @@ class BigramLanguageModel(nn.Module):
         # 引入一个注意力头让 context 中的 token 能够“交流“起来
         # x = self.sa_head(x)
         # apply multi-head self attention
-        x = self.sa_heads(x)
+        # version 3:
+        # x = self.sa_heads(x)
+        # # 
+        # x = self.ffwd(x)
+        # version 4:
+        x = self.blocks(x)
         logits = self.lm_head(x) # (batch_size, context_len, vocab_size)
         
         if targets is None:
