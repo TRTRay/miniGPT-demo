@@ -6,11 +6,11 @@ from torch.nn import functional as F
 
 # hyperparameters
 # length of the context / 上下文大小
-block_size = 8
+block_size = 256
 # length of training batch / 并行训练的样本数
-batch_size = 32
+batch_size = 64
 # learning rate / 学习率 -> 参数更新的步长
-learning_rate = 1e-3
+learning_rate = 3e-4
 # evaluation intevals / 每多少 step 进行一次 loss 验证，监控训练过程
 eval_interval = 500
 # all interations / 总共迭代多少步 iteration
@@ -22,9 +22,11 @@ device = 'mps' if torch.mps.is_available() else 'cpu'
 
 # number of the embed dimension
 # in version 2, we used 32 feature channels to tokenized the vocabulary instead of bi-encoding in version 1
-n_embd = 32
-# 
-# head_size = 16
+n_embd = 384
+
+n_head = 6
+n_layer = 6
+dropout = 0.2
 
 
 
@@ -96,6 +98,7 @@ class Head(nn.Module):
         self.value = nn.Linear(n_embd, head_size, bias=False)
         # 一个用于 mask 的下三角矩阵
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         B, T, C = x.shape   # (B,T,C)
@@ -105,6 +108,7 @@ class Head(nn.Module):
         wei = q @ k.transpose(-2, -1) * C**-0.5     # (B,T,T)
         wei = wei.masked_fill(self.tril[:T,:T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
         # perform weighted aggregation
         v = self.value(x)   # (B,T,head_size)
         out = wei @ v       # (B,T,head_size)
@@ -118,11 +122,12 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
 
     
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
-        out = self.proj(out)
+        out = self.dropout(self.proj(out))
         return out
 
 
@@ -134,7 +139,8 @@ class FeedForward(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(n_embd, n_embd * 4),
             nn.ReLU(),
-            nn.Linear(n_embd * 4, n_embd)
+            nn.Linear(n_embd * 4, n_embd),
+            nn.Dropout(dropout)
         )
 
     def forward(self, x):
@@ -149,13 +155,15 @@ class Block(nn.Module):
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
         # x = self.sa(x)
         # x = self.ffwd(x)
         # residual connection
-        x = x + self.sa(x)
-        x = x + self.ffwd(x)
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
         return x
 
 
@@ -201,11 +209,15 @@ class BigramLanguageModel(nn.Module):
         # version 4: introduce transformer blocks
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.positon_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.blocks = nn.Sequential(
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-        )
+        # self.blocks = nn.Sequential(
+        #     Block(n_embd, n_head=4),
+        #     Block(n_embd, n_head=4),
+        #     Block(n_embd, n_head=4),
+        #     nn.LayerNorm(n_embd),
+        # )
+        # version 5: increase the scale 
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd)
         # 一个线性层将特征映射成 logits
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
@@ -228,6 +240,7 @@ class BigramLanguageModel(nn.Module):
         # x = self.ffwd(x)
         # version 4:
         x = self.blocks(x)
+        x = self.ln_f(x)
         logits = self.lm_head(x) # (batch_size, context_len, vocab_size)
         
         if targets is None:
