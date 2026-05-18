@@ -18,7 +18,14 @@ max_iters = 5000
 # evaluation iterations / validation 的时候采样多少 batch
 eval_iters = 200
 # 训练设备
-device = 'mps' if torch.mps.is_available() else 'cpu'
+device = 'cpu'
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch.mps.is_available():
+    device = torch.device('mps')
+print(f"Device = {device}")
+
+
 
 # number of the embed dimension
 # in version 2, we used 32 feature channels to tokenized the vocabulary instead of bi-encoding in version 1
@@ -208,7 +215,7 @@ class BigramLanguageModel(nn.Module):
 
         # version 4: introduce transformer blocks
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.positon_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.positon_embedding_table = nn.Embedding(block_size, n_embd)
         # self.blocks = nn.Sequential(
         #     Block(n_embd, n_head=4),
         #     Block(n_embd, n_head=4),
